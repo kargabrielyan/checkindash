@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import type { UserRole } from "@prisma/client";
+import { verifyAccessToken } from "@/lib/jwt";
 
 const JWT_COOKIE = "session";
 const DEFAULT_TIMEOUT_MINUTES = 30;
@@ -112,4 +113,20 @@ export async function requireUser(): Promise<JWTPayload> {
     });
   }
   return session;
+}
+
+/**
+ * Resolve auth from request: Bearer token (mobile) or session cookie (dashboard).
+ * Returns JWTPayload or null.
+ */
+export async function getAuthUser(request: Request): Promise<JWTPayload | null> {
+  const authHeader = request.headers.get("authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7).trim();
+    if (token) {
+      const payload = await verifyAccessToken(token);
+      if (payload) return payload;
+    }
+  }
+  return getSession();
 }

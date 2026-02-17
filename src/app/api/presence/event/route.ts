@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { requireUser } from "@/lib/auth";
+import { getAuthUser } from "@/lib/auth";
 
 const presenceSourceEnum = z.enum([
   "APP_LAUNCH",
@@ -25,11 +25,14 @@ const eventSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  let session;
-  try {
-    session = await requireUser();
-  } catch (res) {
-    return res as NextResponse;
+  const session = await getAuthUser(request);
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Only EMPLOYEE and ADMIN may post presence
+  if (session.role !== "EMPLOYEE" && session.role !== "ADMIN") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const user = await prisma.user.findUnique({

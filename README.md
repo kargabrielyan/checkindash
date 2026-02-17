@@ -8,7 +8,7 @@ Production-ready Admin Dashboard for an Office Presence system. The mobile app s
 - **Backend:** Next.js Route Handlers
 - **DB:** Neon (PostgreSQL)
 - **ORM:** Prisma (singleton client for serverless)
-- **Auth:** JWT in httpOnly cookies (admin-only dashboard)
+- **Auth:** Dashboard uses JWT in httpOnly cookies; mobile uses Bearer JWT (see [Mobile auth](#mobile-auth-bearer-token) below)
 - **Validation:** Zod
 
 ## Environment variables
@@ -25,10 +25,10 @@ Required:
 |----------|-------------|
 | `DATABASE_URL` | Neon **pooled** connection string (for serverless) |
 | `DIRECT_URL` | Neon **direct** connection string (for migrations) |
-| `JWT_SECRET` | Long random secret (min 32 characters) |
+| `JWT_SECRET` | Long random secret (min 32 characters); used for both cookie session and Bearer access tokens |
 | `ADMIN_SEED_EMAIL` | Admin email for seed |
 | `ADMIN_SEED_PASSWORD` | Admin password for seed |
-| `SESSION_TIMEOUT_MINUTES` | Session timeout (default 30) |
+| `SESSION_TIMEOUT_MINUTES` | Session timeout for dashboard cookie (default 30) |
 
 **Neon:** Use the pooler URL for `DATABASE_URL` to avoid connection storms in serverless. Use the direct URL for `DIRECT_URL` when running migrations.
 
@@ -112,10 +112,25 @@ Implementation: `src/lib/presence-service.ts` — `calculateSessions(events, now
    npm run db:seed
    ```
 
+## Mobile auth (Bearer token)
+
+The Flutter mobile app authenticates with Bearer JWT; the dashboard continues to use httpOnly cookies. No changes are required in the dashboard UI.
+
+1. **Login:** `POST /api/auth/login` with `{ "email", "password" }`.
+   - Response: `{ ok: true, user: { id, name, email, role }, accessToken }`.
+   - The server also sets the session cookie (unchanged) so browser login still works.
+2. **Presence:** `POST /api/presence/event` with header `Authorization: Bearer <accessToken>`.
+   - Accepts either the session cookie (dashboard) or the Bearer token (mobile).
+   - Only EMPLOYEE and ADMIN may post; inactive or soft-deleted users receive 403.
+3. **Token:** Access token is a JWT (payload: userId, role, email), signed with `JWT_SECRET`, expiry 7 days.
+
+Required env vars for backend (including mobile): `JWT_SECRET`, `DATABASE_URL`, `DIRECT_URL`.
+
 ## API (summary)
 
-- **Auth:** `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
-- **Mobile:** `POST /api/presence/event` (JWT required; inserts presence event)
+- **Health:** `GET /api/health` → `{ ok: true }`
+- **Auth:** `POST /api/auth/login` (returns `accessToken` in JSON and sets cookie), `POST /api/auth/logout`, `GET /api/auth/me`
+- **Mobile:** `POST /api/presence/event` (cookie or `Authorization: Bearer <token>`; inserts presence event)
 - **Admin:** `GET/POST /api/admin/users`, `PATCH/DELETE /api/admin/users/:id` (soft delete), `GET /api/admin/stats`, `GET /api/admin/employees`, `GET /api/admin/employees/:id`
 
 ## Tests

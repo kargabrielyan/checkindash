@@ -7,6 +7,7 @@ import {
   setSessionCookie,
   getSessionTimeoutMinutes,
 } from "@/lib/auth";
+import { signAccessToken } from "@/lib/jwt";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -91,13 +92,21 @@ export async function POST(request: Request) {
     const token = await createToken(user.id, user.email, user.role);
     await setSessionCookie(token);
 
+    const accessToken = await signAccessToken({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    });
+
     return NextResponse.json({
+      ok: true,
       user: {
         id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
       },
+      accessToken,
       expiresIn: timeout * 60,
     });
   } catch (err) {
