@@ -1,0 +1,58 @@
+// Neon: use pooled connection for serverless (DATABASE_URL)
+// Use direct connection for migrations (DIRECT_URL)
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         UserRole  @default(EMPLOYEE)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  presenceEvents PresenceEvent[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  EMPLOYEE
+}
+
+model PresenceEvent {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId         String?
+  timestamp        DateTime  // event time from device
+  status           PresenceStatus
+  source           String    // APP_LAUNCH | APP_RESUME | TIMER_FOREGROUND | NETWORK_CHANGE | BACKGROUND_TASK
+  beaconUrl        String?
+  beaconHttpStatus Int?
+  beaconLatencyMs  Int?
+  platform         String?   // ios | android
+  createdAt        DateTime  @default(now()) // server insert time
+
+  @@index([userId, timestamp])
+  @@index([timestamp])
+  @@index([status, timestamp])
+  @@map("presence_events")
+}
+
+enum PresenceStatus {
+  IN_OFFICE
+  OUT_OF_OFFICE
+  UNKNOWN
+}
