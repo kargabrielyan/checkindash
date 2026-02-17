@@ -4,7 +4,13 @@ import { redirect } from "next/navigation";
 import { startOfDay, subDays, format } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { getSession, getSessionTimeoutMinutes } from "@/lib/auth";
-import { calculateSessions } from "@/lib/presence-service";
+import {
+  calculateSessions,
+  clipSessionsToRange,
+  sumDurationMinutes,
+} from "@/lib/presence-service";
+
+const LOOKBACK_MS = 24 * 60 * 60 * 1000; // 1 day
 
 export async function getOverviewStats(days: number = 30) {
   const session = await getSession();
@@ -32,33 +38,33 @@ export async function getOverviewStats(days: number = 30) {
     };
   }
 
-  const eventsToday = await prisma.presenceEvent.findMany({
+  // Single query: events from (todayStart - lookback) to now for today + current status
+  const todayLookbackStart = new Date(todayStart.getTime() - LOOKBACK_MS);
+  const eventsForToday = await prisma.presenceEvent.findMany({
     where: {
       userId: { in: userIds },
-      timestamp: { gte: todayStart, lte: now },
+      timestamp: { gte: todayLookbackStart, lte: now },
     },
     orderBy: { timestamp: "asc" },
     select: { userId: true, timestamp: true, status: true },
   });
 
-  const eventsByUserToday = new Map<string, typeof eventsToday>();
-  for (const e of eventsToday) {
-    if (!eventsByUserToday.has(e.userId)) eventsByUserToday.set(e.userId, []);
-    eventsByUserToday.get(e.userId)!.push(e);
+  const byUserToday = new Map<string, { timestamp: Date; status: string }[]>();
+  for (const e of eventsForToday) {
+    if (!byUserToday.has(e.userId)) byUserToday.set(e.userId, []);
+    byUserToday.get(e.userId)!.push({ timestamp: e.timestamp, status: e.status });
   }
 
   let totalMinutesToday = 0;
   let currentInOffice = 0;
 
   for (const userId of userIds) {
-    const userEvents = eventsByUserToday.get(userId) ?? [];
-    const { sessions, totalDurationMinutes } = calculateSessions(
-      userEvents,
-      now,
-      timeoutMinutes
-    );
-    totalMinutesToday += totalDurationMinutes;
+    const userEvents = byUserToday.get(userId) ?? [];
+    const { sessions } = calculateSessions(userEvents, now, timeoutMinutes);
+    const todayClipped = clipSessionsToRange(sessions, todayStart, now);
+    totalMinutesToday += sumDurationMinutes(todayClipped);
     const lastSession = sessions[sessions.length - 1];
+    // Current status: IN_OFFICE only if last session end is within timeout (not stale)
     if (
       lastSession &&
       lastSession.end.getTime() >= now.getTime() - timeoutMinutes * 60 * 1000
@@ -70,29 +76,37 @@ export async function getOverviewStats(days: number = 30) {
   const activeCount = userIds.length;
   const averageHoursToday = activeCount > 0 ? totalMinutesToday / 60 / activeCount : 0;
 
-  const hoursPerDay: { date: string; totalHours: number }[] = [];
-  const oneDayMs = 24 * 60 * 60 * 1000;
+  // Single query for chart: full range + lookback, then group by day in code
+  const chartRangeStart = new Date(rangeStart.getTime() - LOOKBACK_MS);
+  const allChartEvents = await prisma.presenceEvent.findMany({
+    where: {
+      userId: { in: userIds },
+      timestamp: { gte: chartRangeStart, lte: now },
+    },
+    orderBy: { timestamp: "asc" },
+    select: { userId: true, timestamp: true, status: true },
+  });
 
+  const byUserChart = new Map<string, { timestamp: Date; status: string }[]>();
+  for (const e of allChartEvents) {
+    if (!byUserChart.has(e.userId)) byUserChart.set(e.userId, []);
+    byUserChart.get(e.userId)!.push({ timestamp: e.timestamp, status: e.status });
+  }
+
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  const hoursPerDay: { date: string; totalHours: number }[] = [];
   for (let i = days - 1; i >= 0; i--) {
     const d = subDays(todayStart, i);
     const dayEnd = new Date(d.getTime() + oneDayMs - 1);
-    const dayEvents = await prisma.presenceEvent.findMany({
-      where: {
-        userId: { in: userIds },
-        timestamp: { gte: d, lte: dayEnd },
-      },
-      orderBy: { timestamp: "asc" },
-      select: { userId: true, timestamp: true, status: true },
-    });
-    const byUser = new Map<string, { timestamp: Date; status: string }[]>();
-    for (const e of dayEvents) {
-      if (!byUser.has(e.userId)) byUser.set(e.userId, []);
-      byUser.get(e.userId)!.push({ timestamp: e.timestamp, status: e.status });
-    }
     let dayTotal = 0;
-    for (const [, evs] of byUser) {
-      const { totalDurationMinutes } = calculateSessions(evs, dayEnd, timeoutMinutes);
-      dayTotal += totalDurationMinutes;
+    for (const userId of userIds) {
+      const userEvents = byUserChart.get(userId) ?? [];
+      const dayEvents = userEvents.filter(
+        (e) => e.timestamp >= new Date(d.getTime() - LOOKBACK_MS) && e.timestamp <= dayEnd
+      );
+      const { sessions } = calculateSessions(dayEvents, dayEnd, timeoutMinutes);
+      const clipped = clipSessionsToRange(sessions, d, dayEnd);
+      dayTotal += sumDurationMinutes(clipped);
     }
     hoursPerDay.push({
       date: format(d, "yyyy-MM-dd"),

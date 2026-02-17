@@ -10,7 +10,14 @@ import {
 } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { getSession, getSessionTimeoutMinutes } from "@/lib/auth";
-import { calculateSessions } from "@/lib/presence-service";
+import {
+  calculateSessions,
+  clipSessionsToRange,
+  sumDurationMinutes,
+} from "@/lib/presence-service";
+
+const LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 export async function getEmployeeDetail(
   id: string,
@@ -42,8 +49,22 @@ export async function getEmployeeDetail(
     rangeStart = subDays(todayStart, days);
   }
 
-  const lookbackStart = new Date(rangeStart.getTime() - 24 * 60 * 60 * 1000);
+  const summaryLookbackStart = new Date(monthStart.getTime() - LOOKBACK_MS);
+  const summaryEvents = await prisma.presenceEvent.findMany({
+    where: {
+      userId: id,
+      timestamp: { gte: summaryLookbackStart, lte: now },
+    },
+    orderBy: { timestamp: "asc" },
+    select: { timestamp: true, status: true },
+  });
 
+  const summarySessions = calculateSessions(summaryEvents, now, timeoutMinutes).sessions;
+  const todayClipped = clipSessionsToRange(summarySessions, todayStart, now);
+  const weekClipped = clipSessionsToRange(summarySessions, weekStart, now);
+  const monthClipped = clipSessionsToRange(summarySessions, monthStart, now);
+
+  const lookbackStart = new Date(rangeStart.getTime() - LOOKBACK_MS);
   const events = await prisma.presenceEvent.findMany({
     where: {
       userId: id,
@@ -63,38 +84,16 @@ export async function getEmployeeDetail(
     timeoutMinutes
   );
 
-  const todayEvents = events.filter((e) => e.timestamp >= todayStart);
-  const weekEvents = events.filter((e) => e.timestamp >= weekStart);
-  const monthEvents = events.filter((e) => e.timestamp >= monthStart);
-
-  const { totalDurationMinutes: todayMinutes } = calculateSessions(
-    todayEvents,
-    now,
-    timeoutMinutes
-  );
-  const { totalDurationMinutes: weekMinutes } = calculateSessions(
-    weekEvents,
-    now,
-    timeoutMinutes
-  );
-  const { totalDurationMinutes: monthMinutes } = calculateSessions(
-    monthEvents,
-    now,
-    timeoutMinutes
-  );
-
   const hoursPerDay: { date: string; hours: number }[] = [];
   for (let i = days - 1; i >= 0; i--) {
     const d = subDays(todayStart, i);
-    const dayEnd = new Date(d.getTime() + 24 * 60 * 60 * 1000 - 1);
+    const dayEnd = new Date(d.getTime() + ONE_DAY_MS - 1);
     const dayEvents = events.filter(
-      (e) => e.timestamp >= d && e.timestamp <= dayEnd
+      (e) => e.timestamp >= new Date(d.getTime() - LOOKBACK_MS) && e.timestamp <= dayEnd
     );
-    const { totalDurationMinutes: dm } = calculateSessions(
-      dayEvents,
-      dayEnd,
-      timeoutMinutes
-    );
+    const { sessions: daySessions } = calculateSessions(dayEvents, dayEnd, timeoutMinutes);
+    const clipped = clipSessionsToRange(daySessions, d, dayEnd);
+    const dm = sumDurationMinutes(clipped);
     hoursPerDay.push({
       date: format(d, "yyyy-MM-dd"),
       hours: Math.round((dm / 60) * 10) / 10,
@@ -104,9 +103,9 @@ export async function getEmployeeDetail(
   return {
     user: { id: user.id, name: user.name, email: user.email },
     summary: {
-      todayHours: Math.round((todayMinutes / 60) * 10) / 10,
-      weekHours: Math.round((weekMinutes / 60) * 10) / 10,
-      monthHours: Math.round((monthMinutes / 60) * 10) / 10,
+      todayHours: Math.round((sumDurationMinutes(todayClipped) / 60) * 10) / 10,
+      weekHours: Math.round((sumDurationMinutes(weekClipped) / 60) * 10) / 10,
+      monthHours: Math.round((sumDurationMinutes(monthClipped) / 60) * 10) / 10,
     },
     sessions: sessions.map((s) => ({
       start: s.start.toISOString(),

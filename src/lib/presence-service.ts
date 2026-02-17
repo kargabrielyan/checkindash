@@ -70,3 +70,37 @@ export function calculateSessions(
   const totalDurationMinutes = sessions.reduce((sum, s) => sum + s.durationMinutes, 0);
   return { sessions, totalDurationMinutes };
 }
+
+/** Sum duration of sessions in minutes. */
+export function sumDurationMinutes(sessions: Session[]): number {
+  return sessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+}
+
+/**
+ * Clip sessions to a time range. Sessions that span boundaries are cut to [rangeStart, rangeEnd].
+ * Used for "today hours", "week hours", etc. so sessions crossing midnight are counted correctly.
+ */
+export function clipSessionsToRange(
+  sessions: Session[],
+  rangeStart: Date,
+  rangeEnd: Date
+): Session[] {
+  const startMs = rangeStart.getTime();
+  const endMs = rangeEnd.getTime();
+  const result: Session[] = [];
+  for (const s of sessions) {
+    const sStart = s.start.getTime();
+    const sEnd = s.end.getTime();
+    const clipStart = Math.max(sStart, startMs);
+    const clipEnd = Math.min(sEnd, endMs);
+    if (clipStart < clipEnd) {
+      const durationMinutes = (clipEnd - clipStart) / (1000 * 60);
+      result.push({
+        start: new Date(clipStart),
+        end: new Date(clipEnd),
+        durationMinutes,
+      });
+    }
+  }
+  return result;
+}

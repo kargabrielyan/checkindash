@@ -61,8 +61,30 @@ export async function POST(request: Request) {
   const existing = await prisma.user.findUnique({
     where: { email: normalizedEmail },
   });
-  if (existing && existing.deletedAt == null) {
-    return NextResponse.json({ error: "User with this email already exists" }, { status: 409 });
+  if (existing) {
+    if (existing.deletedAt == null) {
+      return NextResponse.json({ error: "User with this email already exists" }, { status: 409 });
+    }
+    const passwordHash = await hashPassword(password);
+    const user = await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        name,
+        passwordHash,
+        role,
+        isActive: true,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        isActive: true,
+        createdAt: true,
+      },
+    });
+    return NextResponse.json({ user, restored: true });
   }
 
   const passwordHash = await hashPassword(password);

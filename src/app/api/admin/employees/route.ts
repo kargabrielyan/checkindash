@@ -3,7 +3,13 @@ import { startOfDay, startOfWeek, subDays } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { getSessionTimeoutMinutes } from "@/lib/auth";
-import { calculateSessions } from "@/lib/presence-service";
+import {
+  calculateSessions,
+  clipSessionsToRange,
+  sumDurationMinutes,
+} from "@/lib/presence-service";
+
+const LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 export async function GET(request: Request) {
   try {
@@ -22,11 +28,16 @@ export async function GET(request: Request) {
     select: { id: true, name: true, email: true },
   });
 
-  const lookback = subDays(todayStart, 1);
+  const userIds = users.map((u) => u.id);
+  if (userIds.length === 0) {
+    return NextResponse.json({ employees: [] });
+  }
+
+  const lookbackStart = new Date(Math.min(todayStart.getTime(), weekStart.getTime()) - LOOKBACK_MS);
   const events = await prisma.presenceEvent.findMany({
     where: {
-      userId: { in: users.map((u) => u.id) },
-      timestamp: { gte: lookback },
+      userId: { in: userIds },
+      timestamp: { gte: lookbackStart },
     },
     orderBy: { timestamp: "asc" },
     select: { userId: true, timestamp: true, status: true },
@@ -38,49 +49,38 @@ export async function GET(request: Request) {
     byUser.get(e.userId)!.push({ timestamp: e.timestamp, status: e.status });
   }
 
-  const result = await Promise.all(
-    users.map(async (user) => {
-      const userEvents = byUser.get(user.id) ?? [];
-      const todayEvents = userEvents.filter((e) => e.timestamp >= todayStart);
-      const weekEvents = userEvents.filter((e) => e.timestamp >= weekStart);
+  const result = users.map((user) => {
+    const userEvents = byUser.get(user.id) ?? [];
+    const { sessions } = calculateSessions(userEvents, now, timeoutMinutes);
+    const todayClipped = clipSessionsToRange(sessions, todayStart, now);
+    const weekClipped = clipSessionsToRange(sessions, weekStart, now);
+    const todayMinutes = sumDurationMinutes(todayClipped);
+    const weekMinutes = sumDurationMinutes(weekClipped);
 
-      const { totalDurationMinutes: todayMinutes } = calculateSessions(
-        todayEvents,
-        now,
-        timeoutMinutes
-      );
-      const { totalDurationMinutes: weekMinutes } = calculateSessions(
-        weekEvents,
-        now,
-        timeoutMinutes
-      );
-
-      const lastEvent = userEvents[userEvents.length - 1];
-      let currentStatus: "IN_OFFICE" | "OUT_OF_OFFICE" | "UNKNOWN" = "UNKNOWN";
-      if (lastEvent) {
-        const { sessions } = calculateSessions(userEvents, now, timeoutMinutes);
-        const lastSession = sessions[sessions.length - 1];
-        if (
-          lastSession &&
-          lastSession.end.getTime() >= now.getTime() - timeoutMinutes * 60 * 1000
-        ) {
-          currentStatus = "IN_OFFICE";
-        } else {
-          currentStatus = lastEvent.status === "IN_OFFICE" ? "OUT_OF_OFFICE" : lastEvent.status;
-        }
+    const lastEvent = userEvents[userEvents.length - 1];
+    let currentStatus: "IN_OFFICE" | "OUT_OF_OFFICE" | "UNKNOWN" = "UNKNOWN";
+    if (lastEvent) {
+      const lastSession = sessions[sessions.length - 1];
+      if (
+        lastSession &&
+        lastSession.end.getTime() >= now.getTime() - timeoutMinutes * 60 * 1000
+      ) {
+        currentStatus = "IN_OFFICE";
+      } else {
+        currentStatus = lastEvent.status === "IN_OFFICE" ? "OUT_OF_OFFICE" : (lastEvent.status as "UNKNOWN");
       }
+    }
 
-      return {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        currentStatus,
-        lastSeen: lastEvent?.timestamp ?? null,
-        todayHours: Math.round((todayMinutes / 60) * 10) / 10,
-        weekHours: Math.round((weekMinutes / 60) * 10) / 10,
-      };
-    })
-  );
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      currentStatus,
+      lastSeen: lastEvent?.timestamp ?? null,
+      todayHours: Math.round((todayMinutes / 60) * 10) / 10,
+      weekHours: Math.round((weekMinutes / 60) * 10) / 10,
+    };
+  });
 
   return NextResponse.json({ employees: result });
 }
